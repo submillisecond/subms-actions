@@ -33,7 +33,7 @@ jobs:
           EOF
           git add perf.json
 
-      - name: Run pre-commit hook (expected: exit 1)
+      - name: "Run pre-commit hook (expected exit 1)"
         id: hook
         continue-on-error: true
         working-directory: hooktest
@@ -69,7 +69,7 @@ jobs:
           EOF
           git add perf.json
 
-      - name: Run hook (expected: exit 0)
+      - name: "Run hook (expected exit 0)"
         working-directory: hooktest
         run: node ${{ github.workspace }}/tools/precommit-perf-diff.js perf.json
 
