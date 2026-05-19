@@ -1,0 +1,211 @@
+name: subms perf suite (reusable)
+# A reusable, callable workflow other repos invoke via `workflow_call`. Wraps
+# the four perf actions into one end-to-end pipeline:
+#
+#   bench  ->  diff (vs base ref)  ->  aggregate (rollup)
+#                                  \--->  sink (optional, Slack/Datadog/S3/...)
+#                                  \--->  drift (optional, vs history)
+#
+# This file lives under subms-actions/.github/workflows/ in this monorepo;
+# when spun out to its own repo (e.g. <org>/subms-actions) it will move to
+# the repo's root .github/workflows/ so GitHub treats it as a callable
+# workflow. Caller usage from another repo will then be:
+#
+#   jobs:
+#     perf:
+#       uses: <org>/subms-actions/.github/workflows/subms-perf-suite.yml@v1
+#       secrets: inherit
+#       with:
+#         bench-command: "cargo run --release --features harness --example perf_main < params.txt"
+#         baseline-source: "base-ref"
+#
+# Until then it's a template - the action `uses:` paths assume the caller
+# has checked out the subms-actions repo at `./.subms-actions/`; see the
+# top of the `perf` job for the vendor-checkout step.
+
+on:
+  workflow_call:
+    inputs:
+      bench-command:
+        description: Shell command to run the bench. Stdout must be a subms perf JSON.
+        type: string
+        required: true
+      bench-stdin:
+        description: Optional text piped to the bench command's stdin (e.g. `entries=50000\nwarmup=5000\nseed=0`).
+        type: string
+        required: false
+        default: ""
+      bench-workdir:
+        description: Working directory for the bench command.
+        type: string
+        required: false
+        default: ""
+      bench-warmup-runs:
+        description: Throwaway runs before measurement.
+        type: string
+        required: false
+        default: "0"
+
+      baseline-source:
+        description: |
+          Where to fetch the baseline from. `base-ref` (default) uses the
+          PR's base SHA. `committed-file` uses a checked-in perf JSON path.
+          `artifact` downloads a named artifact from a recent workflow run.
+        type: string
+        required: false
+        default: "base-ref"
+      baseline-path:
+        description: |
+          For `base-ref` and `committed-file` modes: path inside the repo
+          where the perf JSON lives.
+        type: string
+        required: false
+        default: "perf.json"
+
+      threshold-pct:
+        description: Regression threshold percent.
+        type: string
+        required: false
+        default: "10"
+      per-stage-thresholds:
+        description: JSON object of per-stage threshold overrides.
+        type: string
+        required: false
+        default: ""
+      fail-on-regression:
+        description: Hard-fail the workflow on regression.
+        type: string
+        required: false
+        default: "true"
+
+      sink:
+        description: Optional sink(s) (comma-separated) to forward the diff to. See subms-action-diff-sink for names.
+        type: string
+        required: false
+        default: ""
+      only-sink-on-regression:
+        description: Only push to the sink when a regression was detected.
+        type: string
+        required: false
+        default: "true"
+
+      drift-history-glob:
+        description: Optional glob to historical perf JSONs for drift detection. Skipped if empty.
+        type: string
+        required: false
+        default: ""
+      drift-k-stddev:
+        description: Drift threshold in standard deviations.
+        type: string
+        required: false
+        default: "3"
+
+      actions-ref:
+        description: |
+          Git ref of the subms-actions repo to vendor in (tag, branch, or SHA).
+          Pin to a release tag in production.
+        type: string
+        required: false
+        default: "main"
+      actions-repo:
+        description: |
+          Owner/name of the subms-actions repo. Override only if you forked it.
+        type: string
+        required: false
+        default: "submillisecond/subms-actions"
+
+    secrets:
+      slack-webhook:           { required: false }
+      datadog-api-key:         { required: false }
+      newrelic-license-key:    { required: false }
+      honeycomb-api-key:       { required: false }
+      splunk-token:            { required: false }
+      influx-token:            { required: false }
+      s3-presigned-url:        { required: false }
+      gcs-presigned-url:       { required: false }
+      azure-sas-url:           { required: false }
+
+jobs:
+  perf:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+
+      # Vendor the umbrella repo only for its shared scripts (snapshot-baseline.sh).
+      # The individual actions are referenced via cross-repo `uses:` below.
+      - name: Vendor subms-actions umbrella (shared scripts)
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.actions-repo }}
+          ref: ${{ inputs.actions-ref }}
+          path: .subms-actions
+
+      # 1. Run the bench, capture JSON.
+      - uses: submillisecond/subms-action-bench@v1
+        id: bench
+        with:
+          command:      ${{ inputs.bench-command }}
+          stdin:        ${{ inputs.bench-stdin }}
+          workdir:      ${{ inputs.bench-workdir }}
+          output:       candidate.json
+          warmup-runs:  ${{ inputs.bench-warmup-runs }}
+
+      # 2. Fetch the baseline.
+      - name: Fetch baseline (base-ref)
+        if: inputs.baseline-source == 'base-ref'
+        env:
+          BASE_SHA:       ${{ github.event.pull_request.base.sha }}
+          PERF_PATH:      ${{ inputs.baseline-path }}
+          OUTPUT_FILE:    baseline.json
+          FALLBACK:       copy-candidate
+          CANDIDATE_FILE: candidate.json
+        run: bash $GITHUB_WORKSPACE/.subms-actions/scripts/snapshot-baseline.sh
+
+      - name: Fetch baseline (committed-file)
+        if: inputs.baseline-source == 'committed-file'
+        env:
+          BASELINE_PATH: ${{ inputs.baseline-path }}
+        run: cp "${BASELINE_PATH}" baseline.json
+
+      # 3. Diff + gate.
+      - uses: submillisecond/subms-action-diff@v1
+        id: diff
+        with:
+          baseline:               baseline.json
+          candidate:              candidate.json
+          threshold-pct:          ${{ inputs.threshold-pct }}
+          per-stage-thresholds:   ${{ inputs.per-stage-thresholds }}
+          fail-on-regression:     ${{ inputs.fail-on-regression }}
+
+      # 4. (Optional) Sinks - one composite step that knows about every
+      # secret. Only the named sinks actually run.
+      - name: Push to sinks
+        if: ${{ inputs.sink != '' && (steps.diff.outputs.has-regression == 'true' || inputs.only-sink-on-regression != 'true') }}
+        uses: submillisecond/subms-action-diff-sink@v1
+        with:
+          input:                  subms-diff.json
+          sink:                   ${{ inputs.sink }}
+          only-on-regression:     ${{ inputs.only-sink-on-regression }}
+          webhook-url:            ${{ secrets.slack-webhook }}
+          datadog-api-key:        ${{ secrets.datadog-api-key }}
+          newrelic-license-key:   ${{ secrets.newrelic-license-key }}
+          honeycomb-api-key:      ${{ secrets.honeycomb-api-key }}
+          splunk-token:           ${{ secrets.splunk-token }}
+          influx-token:           ${{ secrets.influx-token }}
+          s3-url:                 ${{ secrets.s3-presigned-url }}
+          gcs-url:                ${{ secrets.gcs-presigned-url }}
+          azure-url:              ${{ secrets.azure-sas-url }}
+
+      # 5. (Optional) Drift detection if a history glob was supplied.
+      - name: Drift detection
+        if: ${{ inputs.drift-history-glob != '' }}
+        uses: submillisecond/subms-action-drift@v1
+        with:
+          candidate:      candidate.json
+          history-glob:   ${{ inputs.drift-history-glob }}
+          k-stddev:       ${{ inputs.drift-k-stddev }}
+          fail-on-drift:  ${{ inputs.fail-on-regression }}

@@ -1,0 +1,163 @@
+name: self-test
+
+on:
+  push:
+  pull_request:
+
+# The umbrella repo doesn't define its own action; it ships shared tooling
+# (the reusable workflow, snapshot-baseline.sh, the pre-commit hook). This
+# workflow exercises each in isolation against synthetic data.
+
+jobs:
+  precommit-hook-blocks-regression:
+    name: pre-commit hook refuses a regressing commit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Init a throwaway repo with a baseline perf JSON
+        run: |
+          mkdir hooktest
+          cd hooktest
+          git init -q
+          git -c user.email=ci@example.com -c user.name=ci commit -q --allow-empty -m init
+          cat > perf.json << 'EOF'
+          {"workload":"x","lang":"r","timestamp":"2026-01-01T00:00:00Z","inputs":{},"meta":{},"stages":{"put":{"count":1,"p50_ns":100,"p99_ns":200,"p999_ns":300,"max_ns":400,"mean_ns":150,"samples_ns":[]}}}
+          EOF
+          git add perf.json
+          git -c user.email=ci@example.com -c user.name=ci commit -q -m baseline
+
+          # Stage a regression on p99 (+50%)
+          cat > perf.json << 'EOF'
+          {"workload":"x","lang":"r","timestamp":"2026-01-01T00:00:00Z","inputs":{},"meta":{},"stages":{"put":{"count":1,"p50_ns":100,"p99_ns":300,"p999_ns":300,"max_ns":400,"mean_ns":150,"samples_ns":[]}}}
+          EOF
+          git add perf.json
+
+      - name: Run pre-commit hook (expected: exit 1)
+        id: hook
+        continue-on-error: true
+        working-directory: hooktest
+        env:
+          SUBMS_PRECOMMIT_THRESHOLD_PCT: "10"
+        run: node ${{ github.workspace }}/tools/precommit-perf-diff.js perf.json
+
+      - name: Assert hook blocked the commit
+        run: |
+          if [ "${{ steps.hook.outcome }}" != "failure" ]; then
+            echo "pre-commit hook should have exited 1"; exit 1
+          fi
+
+  precommit-hook-allows-under-threshold:
+    name: pre-commit hook allows commits inside threshold
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Init repo + stage a tiny drift
+        run: |
+          mkdir hooktest
+          cd hooktest
+          git init -q
+          cat > perf.json << 'EOF'
+          {"workload":"x","lang":"r","timestamp":"2026-01-01T00:00:00Z","inputs":{},"meta":{},"stages":{"put":{"count":1,"p50_ns":100,"p99_ns":200,"p999_ns":300,"max_ns":400,"mean_ns":150,"samples_ns":[]}}}
+          EOF
+          git add perf.json
+          git -c user.email=ci@example.com -c user.name=ci commit -q -m baseline
+          # +5 % on p99 (under default 10 %)
+          cat > perf.json << 'EOF'
+          {"workload":"x","lang":"r","timestamp":"2026-01-01T00:00:00Z","inputs":{},"meta":{},"stages":{"put":{"count":1,"p50_ns":100,"p99_ns":210,"p999_ns":300,"max_ns":400,"mean_ns":150,"samples_ns":[]}}}
+          EOF
+          git add perf.json
+
+      - name: Run hook (expected: exit 0)
+        working-directory: hooktest
+        run: node ${{ github.workspace }}/tools/precommit-perf-diff.js perf.json
+
+  snapshot-baseline-script:
+    name: snapshot-baseline.sh resolves base ref perf JSON
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Init a repo with a perf file on HEAD
+        run: |
+          mkdir snap
+          cd snap
+          git init -q
+          mkdir -p perf
+          echo '{"baseline":true}' > perf/x.json
+          git add perf/x.json
+          git -c user.email=ci@example.com -c user.name=ci commit -q -m initial
+          BASE_SHA=$(git rev-parse HEAD)
+          echo "BASE_SHA=$BASE_SHA" >> $GITHUB_ENV
+
+      - name: Run snapshot-baseline.sh against HEAD
+        working-directory: snap
+        env:
+          PERF_PATH: perf/x.json
+          OUTPUT_FILE: out.json
+          FALLBACK: skip
+        run: bash ${{ github.workspace }}/scripts/snapshot-baseline.sh
+
+      - name: Assert baseline captured
+        run: |
+          test -s snap/out.json
+          grep -q '"baseline":true' snap/out.json
+
+  snapshot-baseline-fallback-skip:
+    name: snapshot-baseline.sh skip fallback emits exists=false
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Init repo without the perf file
+        run: |
+          mkdir snap
+          cd snap
+          git init -q
+          git -c user.email=ci@example.com -c user.name=ci commit -q --allow-empty -m init
+          echo "BASE_SHA=$(git rev-parse HEAD)" >> $GITHUB_ENV
+
+      - name: Snapshot (missing path; skip fallback)
+        id: snap
+        working-directory: snap
+        env:
+          PERF_PATH: perf/missing.json
+          OUTPUT_FILE: out.json
+          FALLBACK: skip
+        run: bash ${{ github.workspace }}/scripts/snapshot-baseline.sh
+
+      - name: Assert exists=false on the step's output
+        run: |
+          [ "${{ steps.snap.outputs.exists }}" = "false" ] || { echo "expected exists=false"; exit 1; }
+
+  reusable-workflow-syntax:
+    name: subms-perf-suite.yml is loadable
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate workflow YAML parses + has workflow_call
+        run: |
+          # The reusable workflow must declare workflow_call - that's what
+          # makes it callable. A YAML typo or missing block fails this gate.
+          python3 - << 'PY'
+          import sys, yaml
+          with open(".github/workflows/subms-perf-suite.yml") as f:
+              doc = yaml.safe_load(f)
+          # YAML loads `on:` as Python True (boolean) because PyYAML treats
+          # bare `on` as a YAML 1.1 boolean. Accept either form.
+          on = doc.get("on") or doc.get(True)
+          if not on or "workflow_call" not in on:
+              print("subms-perf-suite.yml missing on.workflow_call")
+              sys.exit(1)
+          jobs = doc.get("jobs") or {}
+          if "perf" not in jobs:
+              print("subms-perf-suite.yml missing perf job")
+              sys.exit(1)
+          steps = jobs["perf"].get("steps") or []
+          if len(steps) < 3:
+              print(f"subms-perf-suite.yml has only {len(steps)} steps; expected 3+")
+              sys.exit(1)
+          print(f"OK: workflow has {len(steps)} steps")
+          PY
