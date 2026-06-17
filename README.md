@@ -1,5 +1,7 @@
 # subms-actions
 
+[![self-test](https://github.com/submillisecond/subms-actions/actions/workflows/self-test.yml/badge.svg)](https://github.com/submillisecond/subms-actions/actions/workflows/self-test.yml) [![release](https://img.shields.io/github/v/release/submillisecond/subms-actions?include_prereleases&sort=semver)](https://github.com/submillisecond/subms-actions/releases) [![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 **Continuous performance testing as composable GitHub Actions.** Five
 actions, a pre-commit hook, and a reusable workflow that turn any
 JSON-emitting bench into a CI-gated, observable, sink-friendly, drift-aware

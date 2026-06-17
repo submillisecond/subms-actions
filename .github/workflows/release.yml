@@ -1,0 +1,46 @@
+name: release
+
+on:
+  push:
+    tags: ['v*']
+
+# A tag push (e.g. `git tag v0.1.0 && git push origin v0.1.0`) creates a
+# GitHub Release with auto-generated notes and moves the floating major tag
+# (v0 / v1 / v2 ...) to the new SHA. Consumers that pin to a major tag
+# (`uses: submillisecond/<repo>@v1`) get the latest patch automatically.
+# Consumers that pin to a precise tag (`@v1.2.3`) stay frozen.
+
+permissions:
+  contents: write     # required to create releases + force-push the floater
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0     # full history for release-notes generation
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          draft: false
+          # A semver string with a hyphen (e.g. v0.1.0-rc1) is treated as a
+          # prerelease and never moves the floating major tag.
+          prerelease: ${{ contains(github.ref, '-') }}
+
+      - name: Update floating major tag
+        if: ${{ !contains(github.ref, '-') }}
+        run: |
+          set -e
+          TAG_NAME="${GITHUB_REF#refs/tags/}"
+          MAJOR=$(echo "$TAG_NAME" | sed -E 's/^v([0-9]+).*/v\1/')
+          if [ "$MAJOR" = "$TAG_NAME" ]; then
+            echo "tag $TAG_NAME does not match v<major>.<minor>.<patch> - skipping floater"
+            exit 0
+          fi
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -f "$MAJOR" "$TAG_NAME"
+          git push origin "$MAJOR" --force
