@@ -17,3 +17,7 @@ node_modules/
 # OS
 .DS_Store
 Thumbs.db
+
+# Internal dev guidance (imports the private subms-specs golden) - never ship publicly
+CLAUDE.md
+.design/
