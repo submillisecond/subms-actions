@@ -1,0 +1,19 @@
+{
+  "name": "subms-actions",
+  "version": "0.1.0",
+  "description": "submillisecond perf-gate tooling: reusable workflow, GitHub Actions suite, and the pre-commit hooks that run the same diff math locally.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/submillisecond/subms-actions.git"
+  },
+  "bin": {
+    "subms-perf-diff": "tools/precommit-perf-diff.js"
+  },
+  "files": [
+    "tools/"
+  ],
+  "engines": {
+    "node": ">=20"
+  }
+}

@@ -4,7 +4,7 @@
     Diff every staged subms perf JSON file against its current HEAD version
     and refuse the commit if any stage regresses beyond the configured
     threshold. Catches "I broke perf locally" before the change lands in CI.
-  entry: node tools/precommit-perf-diff.js
+  entry: subms-perf-diff
   language: node
   language_version: "20"
   files: \.(perf|bench)\.json$|/perf/.*\.json$|/bench/.*\.json$
@@ -18,7 +18,7 @@
     Print a per-stage percentile table for every staged subms perf JSON.
     Read-only - never refuses the commit. Use alongside `subms-perf-diff`
     for context, or alone when you just want a quick eyeball during commit.
-  entry: node tools/precommit-perf-diff.js
+  entry: subms-perf-diff
   language: node
   language_version: "20"
   files: \.(perf|bench)\.json$|/perf/.*\.json$|/bench/.*\.json$
